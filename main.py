@@ -2,7 +2,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
+import importlib.util
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -66,8 +68,27 @@ class DownloadRequest(BaseModel):
     end: str
     quality: int = Field(ge=720, le=4320)
 
+def ytdlp_command() -> list[str]:
+    """Prefer the virtualenv's yt-dlp so bundled plugins are picked up.
+
+    YouTube now requires a PO token for full-quality downloads. The bundled
+    bgutil-ytdlp-pot-provider plugin supplies one, but it only loads when the
+    venv's yt-dlp module is used. Fall back to a system binary when the venv
+    module is unavailable.
+    """
+    if importlib.util.find_spec("yt_dlp") is not None:
+        return [sys.executable, "-m", "yt_dlp"]
+    if shutil.which("yt-dlp") is not None:
+        return ["yt-dlp"]
+    return []
+
+
 def require_dependencies():
-    missing = [x for x in ("yt-dlp", "ffmpeg") if shutil.which(x) is None]
+    missing = []
+    if not ytdlp_command():
+        missing.append("yt-dlp")
+    if shutil.which("ffmpeg") is None:
+        missing.append("ffmpeg")
     if missing:
         raise HTTPException(503, "Missing dependencies: " + ", ".join(missing) +
                             ". Install them with: brew install yt-dlp ffmpeg")
@@ -78,14 +99,18 @@ def home():
 
 @app.get("/api/health")
 def health():
-    missing = [x for x in ("yt-dlp", "ffmpeg") if shutil.which(x) is None]
+    missing = []
+    if not ytdlp_command():
+        missing.append("yt-dlp")
+    if shutil.which("ffmpeg") is None:
+        missing.append("ffmpeg")
     return {"ok": not missing, "missing": missing}
 
 @app.post("/api/info")
 def video_info(req: InfoRequest):
     require_dependencies()
     url = validate_youtube_url(req.url)
-    cmd = ["yt-dlp", "--dump-single-json", "--no-warnings", "--skip-download", url]
+    cmd = ytdlp_command() + ["--dump-single-json", "--no-warnings", "--skip-download", url]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
@@ -138,8 +163,8 @@ def create_download(req: DownloadRequest):
     # Select the requested height or the best available height at/above 720p,
     # never intentionally select a video stream below 720p.
     fmt = f"bestvideo[height={req.quality}][height>=720]+bestaudio/best[height={req.quality}][height>=720]/bestvideo[height<={req.quality}][height>=720]+bestaudio/best[height<={req.quality}][height>=720]"
-    cmd = [
-        "yt-dlp", "--no-warnings", "--newline",
+    cmd = ytdlp_command() + [
+        "--no-warnings", "--newline",
         "--download-sections", f"*{req.start.strip()}-{req.end.strip()}",
         "--force-keyframes-at-cuts", "--merge-output-format", "mp4",
         "-f", fmt, "-o", output_template, url

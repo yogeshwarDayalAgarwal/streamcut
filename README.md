@@ -53,7 +53,7 @@ Visit http://127.0.0.1:8000 in your browser.
 
 ## Architecture
 
-- `static/index.html`: responsive frontend and YouTube IFrame API player
+- `static/index.html`: responsive frontend with a YouTube IFrame API player, draggable trim timeline, quality picker, and job progress UI wired to the API below
 - `main.py`: FastAPI endpoints for metadata, quality lookup, asynchronous segment processing, and file delivery
 - `downloads/`: temporary outputs; create a cleanup policy before using beyond local testing
 

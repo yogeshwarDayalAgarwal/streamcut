@@ -2,3 +2,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.0
 yt-dlp[default]>=2025.11.12
+bgutil-ytdlp-pot-provider>=0.8.0
