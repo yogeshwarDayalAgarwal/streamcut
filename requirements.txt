@@ -1,5 +1,7 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.0
-yt-dlp[default]>=2025.11.12
-bgutil-ytdlp-pot-provider>=0.8.0
+# yt-dlp 2026.8.19 or newer is required. Older builds (e.g. 2026.6.9) get an
+# HTTP 403 from YouTube's media CDN on the download step even though metadata
+# extraction still succeeds. Bump this deliberately when YouTube breaks again.
+yt-dlp[default]>=2026.8.19

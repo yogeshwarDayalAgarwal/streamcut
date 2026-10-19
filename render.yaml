@@ -5,3 +5,8 @@ services:
     plan: free
     healthCheckPath: /api/health
     autoDeploy: true
+    envVars:
+      # Temporary job output. Render's filesystem is ephemeral, so this only
+      # needs to survive the life of a request.
+      - key: STREAMCUT_OUTPUT_DIR
+        value: /app/downloads

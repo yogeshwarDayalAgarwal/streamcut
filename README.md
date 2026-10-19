@@ -56,6 +56,18 @@ Visit http://127.0.0.1:8000 in your browser.
 - `static/index.html`: responsive frontend with a YouTube IFrame API player, draggable trim timeline, quality picker, and job progress UI wired to the API below
 - `main.py`: FastAPI endpoints for metadata, quality lookup, asynchronous segment processing, and file delivery
 - `downloads/`: temporary outputs; create a cleanup policy before using beyond local testing
+- `NOTES.md`: measurements and reasoning behind the download/cut pipeline
+
+### How a download is processed
+
+Each job runs in two stages:
+
+1. yt-dlp downloads the source with its **native** downloader (fast, parallel fragments).
+2. ffmpeg cuts the segment, **re-encoding** so both boundaries are frame-accurate.
+
+Re-encoding is deliberate. Stream-copying is much faster but silently drops
+requested frames when the range does not land on keyframes. See `NOTES.md` for
+the measured comparisons.
 
 ## API endpoints
 
@@ -65,20 +77,28 @@ Visit http://127.0.0.1:8000 in your browser.
 - `GET /api/jobs/{job_id}`
 - `GET /api/jobs/{job_id}/file`
 
-
 ## Deploy to GitHub + Render
 
-1. Upload the contents of this folder to the root of your GitHub repository (not the ZIP itself).
+1. Commit and push this folder's contents to the root of your GitHub repository (not the ZIP itself). `.gitignore` keeps `.venv/`, `downloads/`, and caches out of the repo.
 2. In Render, choose **New + → Web Service**, connect your GitHub account, and select this repository.
 3. Set **Language/Runtime** to **Docker** if Render does not detect the Dockerfile automatically.
 4. Leave Dockerfile path as `./Dockerfile`, choose a region, and create the service.
-5. Render will build the Docker image, install FFmpeg and Python dependencies, then start the app on the port supplied by Render.
+5. Render builds the image: it installs FFmpeg, Deno, and the Python dependencies, then starts the app on the port Render supplies.
 6. Open the generated `https://...onrender.com` URL and test `/api/health`.
 
 The `render.yaml` file is an optional Blueprint configuration. If you create the service manually, use the settings above.
+
+Because Render auto-deploys on push, a simple workflow is: edit locally, test with `uvicorn main:app --reload`, then `git push` to release.
+
+### Keeping yt-dlp current
+
+If downloads start failing with an HTTP 403 while metadata still works, the
+yt-dlp pin in `requirements.txt` is almost certainly stale. Bump
+`yt-dlp>=...` to the newest release, push, and let Render rebuild.
 
 ### Public deployment warning
 
 This MVP does not include user authentication or usage quotas. Anyone who discovers the public URL may be able to submit processing requests. Do not use it as an unrestricted public service until access controls, rate limits, concurrent-job limits, and temporary-file cleanup are implemented. For a private editor workflow, add a shared access gate before sharing the URL broadly.
 
 Render free instances can sleep while idle, and their local filesystem is ephemeral. Large/long jobs may exceed free-instance resource or timeout limits. Test with a short clip first.
+
