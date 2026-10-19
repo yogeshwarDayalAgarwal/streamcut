@@ -91,7 +91,19 @@ def video_info(req: InfoRequest):
     except subprocess.TimeoutExpired:
         raise HTTPException(504, "Timed out while reading video information.")
     if result.returncode != 0:
-        raise HTTPException(400, "Could not read this video. It may be private, unavailable, age-restricted, or require authentication.")
+        # Keep the UI message actionable while preserving the real cause in Render logs.
+        detail = (result.stderr or result.stdout or "yt-dlp exited without an error message").strip()
+        print(f"[StreamCut] yt-dlp metadata extraction failed for {url}: {detail[-5000:]}", flush=True)
+        lowered = detail.lower()
+        if "sign in to confirm" in lowered or "not a bot" in lowered or "po token" in lowered:
+            message = "YouTube blocked server-side extraction with an authentication/bot check. The video can still play in the browser; check Render logs for details."
+        elif "video unavailable" in lowered or "private video" in lowered:
+            message = "YouTube reports this video as unavailable or private to the server. Check the video visibility and Render logs."
+        elif "javascript runtime" in lowered or "challenge" in lowered:
+            message = "YouTube extraction needs its JavaScript challenge runtime. Redeploy the latest StreamCut Docker image and check Render logs."
+        else:
+            message = "StreamCut could not extract video formats from YouTube. Check the Render logs for the underlying yt-dlp error."
+        raise HTTPException(400, message)
     import json
     try:
         data = json.loads(result.stdout)
