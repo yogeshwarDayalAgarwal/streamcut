@@ -468,6 +468,7 @@
     duration: 0,
     qualities: [],
     quality: 720,
+    vertical: false,
     player: null,
     playerReady: false,
     ytReady: false,
@@ -778,6 +779,11 @@
 
   var QUALITY_NOTES = { 720: "HD", 1080: "Full HD", 1440: "QHD", 2160: "4K" };
 
+  function qualityNote(height) {
+    var note = QUALITY_NOTES[height] || "HD";
+    return state.vertical ? note + " · Vertical" : note;
+  }
+
   function renderQualities() {
     el.qualityOptions.innerHTML = "";
     var available = state.qualities;
@@ -798,7 +804,7 @@
       option.tabIndex = 0;
       option.innerHTML =
         '<div class="q-label">' + height + "p</div>" +
-        '<div class="q-note">' + (QUALITY_NOTES[height] || "HD") + "</div>";
+        '<div class="q-note">' + qualityNote(height) + "</div>";
 
       function choose() {
         state.quality = height;
@@ -815,7 +821,8 @@
   }
 
   function updateClipQualityLabel() {
-    el.clipQuality.textContent = state.quality + "p · MP4 when supported";
+    var suffix = state.vertical ? " (vertical)" : "";
+    el.clipQuality.textContent = state.quality + "p" + suffix + " · MP4 when supported";
   }
 
   /* ---------- load flow ---------- */
@@ -852,6 +859,7 @@
 
       state.duration = Number(info.duration) || 0;
       state.qualities = Array.isArray(info.qualities) ? info.qualities.slice().sort(function (a, b) { return a - b; }) : [];
+      state.vertical = Boolean(info.vertical);
 
       elsShowVideoMeta(info);
       applyInputsFromSeconds(0, state.duration);
