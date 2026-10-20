@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import importlib.util
+import json
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,9 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 JOBS = {}
 LOCK = threading.Lock()
+# Remembers the last /api/info result per URL so /api/download can reuse the
+# orientation without paying for a second yt-dlp extraction.
+INFO_CACHE = {}
 
 def validate_youtube_url(url: str) -> str:
     url = url.strip()
@@ -98,6 +102,44 @@ def require_dependencies():
         raise HTTPException(503, "Missing dependencies: " + ", ".join(missing) +
                             ". Install them with: brew install yt-dlp ffmpeg")
 
+
+# Player clients to try, in order. YouTube serves each client a slightly different
+# response, and on datacenter IPs (like Render's) one client may fail with
+# "Failed to extract any player response" while another succeeds. Trying more
+# than one makes extraction resilient to that without changing behavior locally.
+PLAYER_CLIENT_FALLBACKS = (None, "web,mweb,tv", "android,web")
+
+
+def ytdlp_metadata(url: str, timeout: int = 60) -> tuple[int, str, str]:
+    """Fetch yt-dlp's JSON metadata, retrying with alternate player clients.
+
+    Returns (returncode, stdout, stderr) for the last attempt. The default
+    client is tried first; the alternates only run when the failure looks like a
+    player-response problem, so the happy path stays a single subprocess.
+    """
+    base = ytdlp_command()
+    last = (1, "", "yt-dlp is not installed.")
+    for client in PLAYER_CLIENT_FALLBACKS:
+        cmd = base + ["--dump-single-json", "--no-warnings", "--skip-download"]
+        if client:
+            cmd += ["--extractor-args", f"youtube:player_client={client}"]
+        cmd.append(url)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            last = (1, "", "Timed out while reading video information.")
+            continue
+        if result.returncode == 0:
+            return result.returncode, result.stdout, result.stderr
+        last = (result.returncode, result.stdout, result.stderr)
+        detail = (result.stderr or result.stdout or "").lower()
+        # Only fall through to the next client when the failure is about the
+        # player response or a bot check. Other errors (private, unavailable)
+        # will not be fixed by a different client.
+        if not any(word in detail for word in ("player response", "sign in to confirm", "not a bot", "po token")):
+            break
+    return last
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     return (STATIC / "index.html").read_text(encoding="utf-8")
@@ -115,14 +157,10 @@ def health():
 def video_info(req: InfoRequest):
     require_dependencies()
     url = validate_youtube_url(req.url)
-    cmd = ytdlp_command() + ["--dump-single-json", "--no-warnings", "--skip-download", url]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "Timed out while reading video information.")
-    if result.returncode != 0:
+    code, stdout, stderr = ytdlp_metadata(url)
+    if code != 0:
         # Keep the UI message actionable while preserving the real cause in Render logs.
-        detail = (result.stderr or result.stdout or "yt-dlp exited without an error message").strip()
+        detail = (stderr or stdout or "yt-dlp exited without an error message").strip()
         print(f"[StreamCut] yt-dlp metadata extraction failed for {url}: {detail[-5000:]}", flush=True)
         lowered = detail.lower()
         if "sign in to confirm" in lowered or "not a bot" in lowered or "po token" in lowered:
@@ -131,26 +169,62 @@ def video_info(req: InfoRequest):
             message = "YouTube reports this video as unavailable or private to the server. Check the video visibility and Render logs."
         elif "javascript runtime" in lowered or "challenge" in lowered:
             message = "YouTube extraction needs its JavaScript challenge runtime. Redeploy the latest StreamCut Docker image and check Render logs."
+        elif "player response" in lowered:
+            message = "YouTube did not return a usable player response to the server. This is usually a datacenter-IP block on Render; try again shortly, or run StreamCut locally. Check Render logs for details."
         else:
             message = "StreamCut could not extract video formats from YouTube. Check the Render logs for the underlying yt-dlp error."
         raise HTTPException(400, message)
-    import json
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(stdout)
     except Exception:
         raise HTTPException(502, "Could not parse video information.")
     formats = data.get("formats", [])
-    heights = sorted({int(f["height"]) for f in formats
-                      if f.get("height") and f.get("vcodec") != "none" and int(f["height"]) >= 720})
+
+    # yt-dlp reports the longer edge as "height" for portrait/vertical videos,
+    # so a 1080x1920 Short would otherwise be advertised as "4K". Use the
+    # shorter edge as the true resolution and expose it as either 16:9 or 9:16.
+    def shorter_edge(f):
+        w, h = f.get("width"), f.get("height")
+        if not w or not h:
+            return None
+        try:
+            return min(int(w), int(h))
+        except (TypeError, ValueError):
+            return None
+
+    vertical = bool(data.get("width") and data.get("height")
+                    and int(data["height"]) > int(data["width"]))
+
+    qualities = []
+    for f in formats:
+        if f.get("vcodec") in (None, "none"):
+            continue
+        edge = shorter_edge(f)
+        if edge is None or edge < 720:
+            continue
+        # Offer standard buckets only (720/1080/1440/2160) so the UI labels stay
+        # meaningful. Non-standard widths map down to the nearest bucket.
+        bucket = max((q for q in (720, 1080, 1440, 2160) if q <= edge), default=None)
+        if bucket:
+            qualities.append(bucket)
+
+    heights = sorted(set(qualities))
     duration = data.get("duration")
-    return {
+    info = {
         "id": data.get("id"),
         "title": data.get("title") or "YouTube video",
         "duration": duration,
         "thumbnail": data.get("thumbnail"),
+        "vertical": vertical,
         "qualities": heights,
         "message": None if heights else "No downloadable video formats at 720p or above were found."
     }
+    with LOCK:
+        INFO_CACHE[url] = info
+        # Keep the cache from growing without bound on a long-running server.
+        if len(INFO_CACHE) > 50:
+            INFO_CACHE.pop(next(iter(INFO_CACHE)))
+    return info
 
 @app.post("/api/download")
 def create_download(req: DownloadRequest):
@@ -164,9 +238,35 @@ def create_download(req: DownloadRequest):
     job_id = uuid.uuid4().hex[:12]
     job_dir = OUTPUT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    # Select the requested height or the best available height at/above 720p,
-    # never intentionally select a video stream below 720p.
-    fmt = f"bestvideo[height={req.quality}][height>=720]+bestaudio/best[height={req.quality}][height>=720]/bestvideo[height<={req.quality}][height>=720]+bestaudio/best[height<={req.quality}][height>=720]"
+
+    # Cap the SHORT edge at the requested resolution. yt-dlp's default sorting
+    # then picks the best stream within that cap, never below 720p. For portrait
+    # video the shorter edge is the width, so capping "height" there would treat
+    # a 1080x1920 clip as if it were 1920p. Orientation comes from the cached
+    # /api/info result when available, so this does not repeat the extraction.
+    q = int(req.quality)
+    vertical = False
+    with LOCK:
+        cached = INFO_CACHE.get(url)
+    if cached:
+        vertical = bool(cached.get("vertical"))
+    else:
+        try:
+            code, stdout, _ = ytdlp_metadata(url)
+            if code == 0:
+                meta = json.loads(stdout)
+                if meta.get("width") and meta.get("height"):
+                    vertical = int(meta["height"]) > int(meta["width"])
+        except Exception:
+            pass
+
+    edge = "width" if vertical else "height"
+    fmt = (
+        f"bestvideo[{edge}<={q}][{edge}>=720]+bestaudio"
+        f"/best[{edge}<={q}][{edge}>=720]"
+        f"/bestvideo[{edge}>=720]+bestaudio"
+        f"/best[{edge}>=720]"
+    )
 
     # Stage 1: fetch the media with yt-dlp's native downloader.
     #

@@ -77,6 +77,43 @@ Both versions reported Deno as an available JS runtime and logged the same
 solver. requirements.txt pins `yt-dlp>=2026.8.19` for this reason. When YouTube
 breaks the download step again, bump that pin rather than adding workarounds.
 
+## "Failed to extract any player response" (datacenter IPs)
+
+A separate failure seen on Render, not locally:
+
+```
+ERROR: [youtube] <id>: Failed to extract any player response
+```
+
+This is environmental. YouTube serves different responses per player client,
+and from datacenter IPs one client can fail entirely while another succeeds.
+`ytdlp_metadata()` in `main.py` handles it by trying the default client first
+and only falling back to alternates (`web,mweb,tv` then `android,web`) when the
+error text looks like a player-response or bot-check problem. Other errors
+(private, unavailable) fail fast without retrying, since a different client
+would not help.
+
+The fallbacks make extraction resilient but are not a guarantee. If YouTube
+starts hard-blocking Render's IP range, the durable fixes are a proxy
+(`--proxy`) or running the app on a different host. The `/api/info` error
+message says as much when this happens.
+
+## Portrait / vertical videos
+
+yt-dlp reports the **longer edge** as `height`. A 1080x1920 Short therefore
+arrives with `height=1920`, which the original logic would have advertised as
+"4K" and matched with a `height=720` selector that grabbed the wrong stream.
+
+Both `/api/info` and `/api/download` now work off the **short edge**:
+
+- `/api/info` computes `min(width, height)` and buckets it to 720/1080/1440/2160,
+  and returns a `vertical` flag the UI shows as "Vertical".
+- `/api/download` caps the short edge (`height<=N` for landscape, `width<=N` for
+  portrait) so a vertical 1080p request gets 720x1280, not 480x854 or 1080x1920.
+
+Orientation is read from the `/api/info` cache (`INFO_CACHE`) when present, so a
+download does not repeat the metadata extraction.
+
 ## Docker / Render notes
 
 - The image installs Deno because yt-dlp needs a JavaScript runtime to solve
